@@ -34,8 +34,31 @@ The assessment requires a Python client published in a GitHub repository. Its fi
 
 The original brief is preserved in [`Puzzle Solver.pdf`](Puzzle%20Solver.pdf).
 
+## Implementation
+
+`puzzle_solver.py` uses only the Python standard library. It keeps one puzzle session active and fetches increasing indices concurrently in bounded batches.
+Pieces are deduplicated by numeric ID, sorted by that ID, and submitted after
+every completed batch.
+
+## Run
+
+Start the challenge server, then run:
+
+```bash
+python3 puzzle_solver.py
+```
+
+Use `python3 puzzle_solver.py --help` to configure the server URL, total
+duration, worker count, batch size, and per-request timeout.
+
+## Strategy
+
+A rejected submission keeps the current session and advances to the next index batch; an accepted submission starts a new session.
+One monotonic deadline, measured from program entry, bounds scheduling and submission.
+At expiration, queued requests are cancelled without waiting for running requests, and late results are never submitted.
+
 ## Roadmap
 
 1. **Baseline:** establish the assessment contract and repository purpose on `main`.
 2. **Implementation PR:** add the solver and its tests as one reviewable work unit.
-3. **Review-fixes PR:** apply independently reviewable corrections identified during implementation review.
+3. **Follow-up PR:** add direct HTTP-client contract tests and CLI failure semantics.
