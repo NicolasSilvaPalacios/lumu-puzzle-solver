@@ -11,7 +11,15 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from puzzle_solver import ApiError, ExecutionLog, HttpPuzzleApi, RunStats, Solver, main
+from puzzle_solver import (
+    ApiError,
+    ExecutionLog,
+    HttpPuzzleApi,
+    RunStats,
+    Solver,
+    build_parser,
+    main,
+)
 
 
 class Clock:
@@ -61,6 +69,20 @@ class HttpPuzzleApiTests(unittest.TestCase):
 
     def response(self, data):
         return io.BytesIO(json.dumps(data).encode())
+
+    def test_start_builds_get_request_and_returns_session_id(self):
+        with patch(
+            "puzzle_solver.urlopen",
+            return_value=self.response({"session_id": "session-1"}),
+        ) as mocked_urlopen:
+            session_id = self.api.start(1.5)
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual("session-1", session_id)
+        self.assertEqual("http://example.test/start", request.full_url)
+        self.assertEqual("GET", request.get_method())
+        self.assertIsNone(request.data)
+        self.assertEqual(1.5, mocked_urlopen.call_args.kwargs["timeout"])
 
     def test_get_piece_builds_encoded_get_request(self):
         with patch(
@@ -272,6 +294,45 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(0, api.submissions)
 
 
+class ArgumentParserTests(unittest.TestCase):
+    def assert_parse_error(self, option, value):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                build_parser().parse_args([option, value])
+        self.assertEqual(2, raised.exception.code)
+
+    def test_float_options_reject_non_positive_non_finite_and_lexical_values(self):
+        for option in ("--duration", "--request-timeout"):
+            for value in ("0", "-0.001", "nan", "inf", "-inf", "invalid"):
+                with self.subTest(option=option, value=value):
+                    self.assert_parse_error(option, value)
+
+    def test_integer_options_reject_non_positive_and_lexical_values(self):
+        for option in ("--workers", "--batch-size"):
+            for value in ("0", "-1", "invalid"):
+                with self.subTest(option=option, value=value):
+                    self.assert_parse_error(option, value)
+
+    def test_minimum_positive_examples_parse_successfully(self):
+        args = build_parser().parse_args(
+            [
+                "--duration",
+                "0.001",
+                "--request-timeout",
+                "0.001",
+                "--workers",
+                "1",
+                "--batch-size",
+                "1",
+            ]
+        )
+
+        self.assertEqual(0.001, args.duration)
+        self.assertEqual(0.001, args.request_timeout)
+        self.assertEqual(1, args.workers)
+        self.assertEqual(1, args.batch_size)
+
+
 class MainTests(unittest.TestCase):
     def run_main(self, stats):
         timestamps = iter(
@@ -314,28 +375,32 @@ class MainTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
 
     def test_finalizes_log_when_argument_parsing_exits(self):
-        timestamps = iter(
-            [
-                datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
-                datetime(2026, 9, 29, 12, 0, 1, tzinfo=timezone.utc),
-            ]
-        )
-        with TemporaryDirectory() as directory:
-            with (
-                patch("puzzle_solver.Path.cwd", return_value=Path(directory)),
-                patch("puzzle_solver._utc_now", side_effect=timestamps),
-                redirect_stderr(io.StringIO()),
-            ):
-                with self.assertRaises(SystemExit) as raised:
-                    main(["--workers", "invalid"])
-            log = (Path(directory) / "output.log").read_text(encoding="utf-8")
+        for argv in (["--workers", "invalid"], ["--duration", "0"]):
+            with self.subTest(argv=argv):
+                timestamps = iter(
+                    [
+                        datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+                        datetime(2026, 9, 29, 12, 0, 1, tzinfo=timezone.utc),
+                    ]
+                )
+                with TemporaryDirectory() as directory:
+                    with (
+                        patch("puzzle_solver.Path.cwd", return_value=Path(directory)),
+                        patch("puzzle_solver._utc_now", side_effect=timestamps),
+                        redirect_stderr(io.StringIO()),
+                    ):
+                        with self.assertRaises(SystemExit) as raised:
+                            main(argv)
+                    log = (Path(directory) / "output.log").read_text(
+                        encoding="utf-8"
+                    )
 
-        self.assertEqual(2, raised.exception.code)
-        self.assertEqual(
-            "Execution started: 2026-09-29T12:00:00Z\n"
-            "Execution finished: 2026-09-29T12:00:01Z exit_code=2\n",
-            log,
-        )
+                self.assertEqual(2, raised.exception.code)
+                self.assertEqual(
+                    "Execution started: 2026-09-29T12:00:00Z\n"
+                    "Execution finished: 2026-09-29T12:00:01Z exit_code=2\n",
+                    log,
+                )
 
 
 class ExecutionLogTests(unittest.TestCase):

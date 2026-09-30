@@ -105,12 +105,12 @@ Run `python3 puzzle_solver.py --help` for the parser-generated reference.
 | Option | Default | Meaning |
 |---|---:|---|
 | `--base-url` | `http://localhost:8080` | Challenge server base URL. |
-| `--duration` | `30.0` seconds | Total solver run duration. |
-| `--workers` | `16` | Maximum retrieval worker threads. |
-| `--batch-size` | `128` | Maximum indices scheduled per batch. |
-| `--request-timeout` | `2.0` seconds | Per-request timeout, capped by remaining run time. |
+| `--duration` | `30.0` seconds | Finite, strictly positive total solver run duration. |
+| `--workers` | `16` | Strictly positive maximum retrieval worker threads. |
+| `--batch-size` | `128` | Strictly positive maximum indices scheduled per batch. |
+| `--request-timeout` | `2.0` seconds | Finite, strictly positive per-request timeout, capped by remaining run time. |
 
-Numeric values should be positive. The current CLI parses their numeric types but does not enforce positivity; valid values are the caller's responsibility.
+`argparse` enforces these numeric constraints before solver construction. Invalid numeric syntax, zero, negative values, and non-finite float values such as `nan`, `inf`, and `-inf` exit with code `2`.
 
 ## `output.log`
 
@@ -159,7 +159,7 @@ Run the merged suite with:
 python3 -m unittest -v
 ```
 
-The current suite contains 13 deterministic tests covering HTTP request construction and response validation, transport error translation, ID ordering and deduplication, batch continuation and session replacement, deadline handling, event reporting, exit semantics, and log finalization. It does not claim live-server integration or benchmark coverage.
+The current suite contains 17 deterministic tests covering CLI numeric validation, HTTP request construction and response validation, transport error translation, ID ordering and deduplication, batch continuation and session replacement, deadline handling, event reporting, exit semantics, and log finalization. It does not claim live-server integration or benchmark coverage.
 
 ## Tradeoffs and known limitations
 
@@ -169,7 +169,6 @@ The current suite contains 13 deterministic tests covering HTTP request construc
 - A failed retrieval index is not retried because subsequent batches continue from the next index.
 - Worker, batch, timeout, and duration defaults are not benchmark-proven.
 - Blocking requests may outlive solver control even though their late results are ignored.
-- Numeric CLI positivity is expected but not enforced.
 
 ## Challenge discussion
 
