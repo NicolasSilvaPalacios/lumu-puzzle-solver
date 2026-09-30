@@ -42,6 +42,9 @@ every completed batch.
 
 ## Run
 
+Python 3.10 or newer is required because the client uses Python 3.10 union type
+syntax. The runtime otherwise depends only on the Python standard library.
+
 Start the challenge server, then run:
 
 ```bash
@@ -50,6 +53,12 @@ python3 puzzle_solver.py
 
 Use `python3 puzzle_solver.py --help` to configure the server URL, total
 duration, worker count, batch size, and per-request timeout.
+
+The final summary reports `scheduled_requests`, the number of retrieval tasks
+submitted to the executor; cancelled tasks may not have reached the server. A
+fatal API error before the first session starts returns a non-zero exit status.
+Piece retrieval and submission errors after a session starts remain recoverable
+and do not make an otherwise valid run fail.
 
 ## Strategy
 

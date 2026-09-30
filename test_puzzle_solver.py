@@ -1,10 +1,14 @@
+import io
+import json
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
+from contextlib import redirect_stdout
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
-from puzzle_solver import Solver
+from puzzle_solver import ApiError, HttpPuzzleApi, RunStats, Solver, main
 
 
 class Clock:
@@ -48,6 +52,90 @@ class ScriptedApi:
         return len(self.submissions) % self.accepted_after == 0
 
 
+class HttpPuzzleApiTests(unittest.TestCase):
+    def setUp(self):
+        self.api = HttpPuzzleApi("http://example.test/")
+
+    def response(self, data):
+        return io.BytesIO(json.dumps(data).encode())
+
+    def test_get_piece_builds_encoded_get_request(self):
+        with patch(
+            "puzzle_solver.urlopen", return_value=self.response({"id": 4, "word": "four"})
+        ) as mocked_urlopen:
+            result = self.api.get_piece("session /?", 7, 1.5)
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual((4, "four"), result)
+        self.assertEqual(
+            "http://example.test/get/7?session_id=session+%2F%3F", request.full_url
+        )
+        self.assertEqual("GET", request.get_method())
+        self.assertIsNone(request.data)
+        self.assertEqual(1.5, mocked_urlopen.call_args.kwargs["timeout"])
+
+    def test_submit_serializes_json_request(self):
+        with patch(
+            "puzzle_solver.urlopen", return_value=self.response({"ok": True})
+        ) as mocked_urlopen:
+            accepted = self.api.submit("session-1", ["one", "two"], 2.0)
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertTrue(accepted)
+        self.assertEqual("http://example.test/submit", request.full_url)
+        self.assertEqual("POST", request.get_method())
+        self.assertEqual(
+            {"session_id": "session-1", "words": ["one", "two"]},
+            json.loads(request.data),
+        )
+        self.assertEqual("application/json", request.get_header("Content-type"))
+
+    def test_validates_response_shapes(self):
+        cases = [
+            ("start", {"session_id": 1}, "invalid /start response"),
+            ("get_piece", {"id": True, "word": "word"}, "invalid /get response"),
+            ("submit", {"ok": "yes"}, "invalid /submit response"),
+            ("start", [], "non-object JSON response for /start"),
+        ]
+
+        for method, response, message in cases:
+            with self.subTest(method=method, response=response):
+                with patch("puzzle_solver.urlopen", return_value=self.response(response)):
+                    with self.assertRaisesRegex(ApiError, message):
+                        if method == "start":
+                            self.api.start(1.0)
+                        elif method == "get_piece":
+                            self.api.get_piece("session", 0, 1.0)
+                        else:
+                            self.api.submit("session", [], 1.0)
+
+    def test_translates_transport_errors(self):
+        errors = [
+            (
+                HTTPError(
+                    "http://example.test/start", 503, "unavailable", None, None
+                ),
+                "HTTP 503 for /start",
+            ),
+            (URLError("connection refused"), "request failed for /start"),
+        ]
+
+        for error, message in errors:
+            with self.subTest(error=type(error).__name__):
+                with patch("puzzle_solver.urlopen", side_effect=error):
+                    with self.assertRaisesRegex(ApiError, message) as raised:
+                        self.api.start(1.0)
+                self.assertIs(error, raised.exception.__cause__)
+                raised.exception.__cause__ = None
+                error.__traceback__ = None
+                if isinstance(error, HTTPError):
+                    error.close()
+
+        with patch("puzzle_solver.urlopen", return_value=io.BytesIO(b"not JSON")):
+            with self.assertRaisesRegex(ApiError, "request failed for /start"):
+                self.api.start(1.0)
+
+
 class SolverTests(unittest.TestCase):
     def make_solver(self, api, clock, **overrides):
         options = {
@@ -87,6 +175,7 @@ class SolverTests(unittest.TestCase):
         self.assertEqual([0, 1, 2, 3], api.requested)
         self.assertEqual(["a", "b"], api.submissions[0][1])
         self.assertEqual(["a", "b", "c"], api.submissions[1][1])
+        self.assertEqual(4, stats.scheduled_requests)
         self.assertEqual(1, stats.solved)
 
     def test_success_starts_replacement_sessions_while_time_remains(self):
@@ -160,6 +249,29 @@ class SolverTests(unittest.TestCase):
             release.set()
         time.sleep(0.01)
         self.assertEqual(0, api.submissions)
+
+
+class MainTests(unittest.TestCase):
+    def test_returns_failure_when_api_error_prevents_first_session(self):
+        with patch("puzzle_solver.Solver") as solver_class:
+            solver_class.return_value.run.return_value = RunStats(errors=1)
+
+            with redirect_stdout(io.StringIO()) as output:
+                exit_code = main([])
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("scheduled_requests=0", output.getvalue())
+
+    def test_returns_success_after_session_starts_despite_recoverable_errors(self):
+        with patch("puzzle_solver.Solver") as solver_class:
+            solver_class.return_value.run.return_value = RunStats(
+                sessions=1, scheduled_requests=2, errors=2
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main([])
+
+        self.assertEqual(0, exit_code)
 
 if __name__ == "__main__":
     unittest.main()

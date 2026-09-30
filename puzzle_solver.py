@@ -79,7 +79,7 @@ class HttpPuzzleApi:
 class RunStats:
     sessions: int = 0
     solved: int = 0
-    requests: int = 0
+    scheduled_requests: int = 0
     errors: int = 0
 
 
@@ -131,7 +131,7 @@ class Solver:
                     next_index += 1
                 if not futures:
                     return False
-                stats.requests += len(futures)
+                stats.scheduled_requests += len(futures)
                 done, pending = wait(futures, timeout=max(0.0, deadline - self.clock()))
                 if pending:
                     for future in pending:
@@ -198,9 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     stats = solver.run(started_at)
     print(
         f"Final: solved={stats.solved} sessions={stats.sessions} "
-        f"requests={stats.requests} errors={stats.errors}"
+        f"scheduled_requests={stats.scheduled_requests} errors={stats.errors}"
     )
-    return 0
+    return int(stats.sessions == 0 and stats.errors > 0)
 
 
 if __name__ == "__main__":
