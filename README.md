@@ -60,6 +60,13 @@ fatal API error before the first session starts returns a non-zero exit status.
 Piece retrieval and submission errors after a session starts remain recoverable
 and do not make an otherwise valid run fail.
 
+Every CLI invocation creates or overwrites `output.log` in the current working
+directory. The human-readable log includes ISO-8601 UTC start and finish times,
+the effective configuration, session lifecycle and API error events, every
+solved puzzle's `session_id`, final counters, and the exit code. The file is
+finalized for normal runs, handled API failures, help or argument exits, and
+unexpected errors that propagate to the caller.
+
 ## Strategy
 
 A rejected submission keeps the current session and advances to the next index batch; an accepted submission starts a new session.

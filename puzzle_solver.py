@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 PROCESS_STARTED = time.monotonic()
+PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 import argparse
 import json
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -19,6 +22,42 @@ from urllib.request import Request, urlopen
 
 class ApiError(RuntimeError):
     pass
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class ExecutionLog:
+    def __init__(
+        self,
+        path: Path,
+        now: Callable[[], datetime] | None = None,
+        started_at: datetime | None = None,
+    ) -> None:
+        self._file = path.open("w", encoding="utf-8")
+        self._now = _utc_now if now is None else now
+        started_at = self._now() if started_at is None else started_at
+        self.record(f"Execution started: {self._format_timestamp(started_at)}")
+
+    def record(self, message: str) -> None:
+        print(message, file=self._file, flush=True)
+
+    def finish(
+        self, exit_code: int | None, failure: BaseException | None = None
+    ) -> None:
+        if failure is not None and not isinstance(failure, SystemExit):
+            self.record(f"Execution failed: {type(failure).__name__}: {failure}")
+        outcome = "unknown" if exit_code is None else str(exit_code)
+        self.record(f"Execution finished: {self._timestamp()} exit_code={outcome}")
+        self._file.close()
+
+    def _timestamp(self) -> str:
+        return self._format_timestamp(self._now())
+
+    @staticmethod
+    def _format_timestamp(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
 
 
 class HttpPuzzleApi:
@@ -92,6 +131,7 @@ class Solver:
         batch_size: int = 128,
         request_timeout: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
+        event_handler: Callable[[str], None] | None = None,
     ) -> None:
         self.api = api
         self.duration = duration
@@ -99,6 +139,7 @@ class Solver:
         self.batch_size = batch_size
         self.request_timeout = request_timeout
         self.clock = clock
+        self.event_handler = event_handler
 
     def run(self, started_at: float | None = None) -> RunStats:
         deadline = (self.clock() if started_at is None else started_at) + self.duration
@@ -108,13 +149,16 @@ class Solver:
                 self._solve_one(deadline, stats)
             except ApiError as error:
                 stats.errors += 1
-                print(f"API error: {error}")
+                message = f"API error: {error}"
+                print(message)
+                self._emit(message)
                 break
         return stats
 
     def _solve_one(self, deadline: float, stats: RunStats) -> bool:
         session_id = self.api.start(self._timeout(deadline))
         stats.sessions += 1
+        self._emit(f"Session started: session_id={session_id}")
         pieces: dict[int, str] = {}
         next_index = 0
 
@@ -141,8 +185,11 @@ class Solver:
                 for future in done:
                     try:
                         piece_id, word = future.result()
-                    except ApiError:
+                    except ApiError as error:
                         stats.errors += 1
+                        self._emit(
+                            f"Piece retrieval failed: session_id={session_id} error={error}"
+                        )
                     else:
                         pieces[piece_id] = word
 
@@ -154,12 +201,16 @@ class Solver:
                     accepted = self.api.submit(
                         session_id, words, self._timeout(deadline)
                     )
-                except ApiError:
+                except ApiError as error:
                     stats.errors += 1
+                    self._emit(
+                        f"Submission failed: session_id={session_id} error={error}"
+                    )
                     continue
 
                 if accepted:
                     stats.solved += 1
+                    self._emit(f"Puzzle solved: session_id={session_id}")
                     return True
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -174,6 +225,10 @@ class Solver:
             raise ApiError("run deadline reached")
         return min(self.request_timeout, remaining)
 
+    def _emit(self, message: str) -> None:
+        if self.event_handler is not None:
+            self.event_handler(message)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -187,20 +242,43 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     started_at = PROCESS_STARTED if argv is None else time.monotonic()
-    args = build_parser().parse_args(argv)
-    solver = Solver(
-        HttpPuzzleApi(args.base_url),
-        duration=args.duration,
-        workers=args.workers,
-        batch_size=args.batch_size,
-        request_timeout=args.request_timeout,
+    wall_started_at = PROCESS_STARTED_AT if argv is None else _utc_now()
+    execution_log = ExecutionLog(
+        Path.cwd() / "output.log", started_at=wall_started_at
     )
-    stats = solver.run(started_at)
-    print(
-        f"Final: solved={stats.solved} sessions={stats.sessions} "
-        f"scheduled_requests={stats.scheduled_requests} errors={stats.errors}"
-    )
-    return int(stats.sessions == 0 and stats.errors > 0)
+    exit_code: int | None = None
+    failure: BaseException | None = None
+    try:
+        args = build_parser().parse_args(argv)
+        execution_log.record(
+            f"Configuration: base_url={args.base_url} duration={args.duration} "
+            f"workers={args.workers} batch_size={args.batch_size} "
+            f"request_timeout={args.request_timeout}"
+        )
+        solver = Solver(
+            HttpPuzzleApi(args.base_url),
+            duration=args.duration,
+            workers=args.workers,
+            batch_size=args.batch_size,
+            request_timeout=args.request_timeout,
+            event_handler=execution_log.record,
+        )
+        stats = solver.run(started_at)
+        summary = (
+            f"Final: solved={stats.solved} sessions={stats.sessions} "
+            f"scheduled_requests={stats.scheduled_requests} errors={stats.errors}"
+        )
+        print(summary)
+        execution_log.record(summary)
+        exit_code = int(stats.sessions == 0 and stats.errors > 0)
+        return exit_code
+    except BaseException as error:
+        failure = error
+        if isinstance(error, SystemExit) and isinstance(error.code, int):
+            exit_code = error.code
+        raise
+    finally:
+        execution_log.finish(exit_code, failure)
 
 
 if __name__ == "__main__":

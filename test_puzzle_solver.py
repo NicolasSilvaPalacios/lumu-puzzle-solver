@@ -4,11 +4,14 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from puzzle_solver import ApiError, HttpPuzzleApi, RunStats, Solver, main
+from puzzle_solver import ApiError, ExecutionLog, HttpPuzzleApi, RunStats, Solver, main
 
 
 class Clock:
@@ -188,6 +191,24 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(2, api.starts)
         self.assertEqual(2, stats.solved)
 
+    def test_reports_started_and_solved_session_ids(self):
+        clock = Clock()
+        events = []
+        api = ScriptedApi({0: (0, "a"), 1: (0, "a")}, clock=clock)
+        solver = self.make_solver(
+            api, clock, duration=1.0, event_handler=events.append
+        )
+
+        solver.run()
+
+        self.assertEqual(
+            [
+                "Session started: session_id=session-1",
+                "Puzzle solved: session_id=session-1",
+            ],
+            events,
+        )
+
     def test_deadline_stops_scheduling_and_ignores_late_work(self):
         clock = Clock()
         started = threading.Event()
@@ -252,26 +273,92 @@ class SolverTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
-    def test_returns_failure_when_api_error_prevents_first_session(self):
-        with patch("puzzle_solver.Solver") as solver_class:
-            solver_class.return_value.run.return_value = RunStats(errors=1)
+    def run_main(self, stats):
+        timestamps = iter(
+            [
+                datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+                datetime(2026, 9, 29, 12, 0, 1, tzinfo=timezone.utc),
+            ]
+        )
+        with TemporaryDirectory() as directory:
+            with (
+                patch("puzzle_solver.Solver") as solver_class,
+                patch("puzzle_solver.Path.cwd", return_value=Path(directory)),
+                patch("puzzle_solver._utc_now", side_effect=timestamps),
+            ):
+                solver_class.return_value.run.return_value = stats
+                with redirect_stdout(io.StringIO()) as output:
+                    exit_code = main([])
+            log = (Path(directory) / "output.log").read_text(encoding="utf-8")
+        return exit_code, output.getvalue(), log
 
-            with redirect_stdout(io.StringIO()) as output:
-                exit_code = main([])
+    def test_returns_failure_when_api_error_prevents_first_session(self):
+        exit_code, output, log = self.run_main(RunStats(errors=1))
 
         self.assertEqual(1, exit_code)
-        self.assertIn("scheduled_requests=0", output.getvalue())
+        self.assertIn("scheduled_requests=0", output)
+        self.assertEqual(
+            "Execution started: 2026-09-29T12:00:00Z\n"
+            "Configuration: base_url=http://localhost:8080 duration=30.0 "
+            "workers=16 batch_size=128 request_timeout=2.0\n"
+            "Final: solved=0 sessions=0 scheduled_requests=0 errors=1\n"
+            "Execution finished: 2026-09-29T12:00:01Z exit_code=1\n",
+            log,
+        )
 
     def test_returns_success_after_session_starts_despite_recoverable_errors(self):
-        with patch("puzzle_solver.Solver") as solver_class:
-            solver_class.return_value.run.return_value = RunStats(
-                sessions=1, scheduled_requests=2, errors=2
-            )
-
-            with redirect_stdout(io.StringIO()):
-                exit_code = main([])
+        exit_code, _, _ = self.run_main(
+            RunStats(sessions=1, scheduled_requests=2, errors=2)
+        )
 
         self.assertEqual(0, exit_code)
+
+    def test_finalizes_log_when_argument_parsing_exits(self):
+        timestamps = iter(
+            [
+                datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+                datetime(2026, 9, 29, 12, 0, 1, tzinfo=timezone.utc),
+            ]
+        )
+        with TemporaryDirectory() as directory:
+            with (
+                patch("puzzle_solver.Path.cwd", return_value=Path(directory)),
+                patch("puzzle_solver._utc_now", side_effect=timestamps),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["--workers", "invalid"])
+            log = (Path(directory) / "output.log").read_text(encoding="utf-8")
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertEqual(
+            "Execution started: 2026-09-29T12:00:00Z\n"
+            "Execution finished: 2026-09-29T12:00:01Z exit_code=2\n",
+            log,
+        )
+
+
+class ExecutionLogTests(unittest.TestCase):
+    def test_finalizes_and_preserves_an_unhandled_failure(self):
+        timestamps = iter(
+            [
+                datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+                datetime(2026, 9, 29, 12, 0, 2, tzinfo=timezone.utc),
+            ]
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "output.log"
+            execution_log = ExecutionLog(path, now=lambda: next(timestamps))
+            error = RuntimeError("boom")
+
+            execution_log.finish(None, error)
+
+            self.assertEqual(
+                "Execution started: 2026-09-29T12:00:00Z\n"
+                "Execution failed: RuntimeError: boom\n"
+                "Execution finished: 2026-09-29T12:00:02Z exit_code=unknown\n",
+                path.read_text(encoding="utf-8"),
+            )
 
 if __name__ == "__main__":
     unittest.main()
