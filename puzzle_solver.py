@@ -11,6 +11,7 @@ PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 import argparse
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,28 @@ from urllib.request import Request, urlopen
 
 class ApiError(RuntimeError):
     pass
+
+
+def strictly_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
+    return parsed
+
+
+def finite_strictly_positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} must be finite and greater than zero"
+        )
+    return parsed
 
 
 def _utc_now() -> datetime:
@@ -233,10 +256,14 @@ class Solver:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:8080")
-    parser.add_argument("--duration", type=float, default=30.0)
-    parser.add_argument("--workers", type=int, default=16)
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--request-timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--duration", type=finite_strictly_positive_float, default=30.0
+    )
+    parser.add_argument("--workers", type=strictly_positive_int, default=16)
+    parser.add_argument("--batch-size", type=strictly_positive_int, default=128)
+    parser.add_argument(
+        "--request-timeout", type=finite_strictly_positive_float, default=2.0
+    )
     return parser
 
 
